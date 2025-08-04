@@ -1,325 +1,393 @@
-﻿#include <winsock2.h>
+﻿// server_iocp_rps.cpp
+#include <winsock2.h>
+#include <mswsock.h>
 #include <ws2tcpip.h>
 #include <windows.h>
-#include <iostream>
+#include <stdio.h>
 #include <string>
 #include <vector>
-#include <thread>
-#include <mutex>
 #include <unordered_map>
-#include <map>
-#include <algorithm>
+#include <mutex>
 
 #pragma comment(lib, "ws2_32.lib")
 
-// 방 구조체: ID, 플레이어 소켓, R/P/S 선택 저장
-struct Room
-{
-    std::string           id;
-    std::vector<SOCKET>   players;
-    std::map<SOCKET, char> moves;
+SOCKET g_listenSock = INVALID_SOCKET;
+
+
+#define PORT            9000
+#define MAX_BUFFER      1024
+#define THREAD_COUNT    4
+
+enum IO_OPERATION { IOAccept, IORead, IOWrite };
+
+struct PER_IO_CONTEXT {
+    OVERLAPPED overlapped;
+    WSABUF     wsaBuf;
+    char       buffer[MAX_BUFFER];
+    IO_OPERATION opType;
+    SOCKET      sock;
 };
 
-std::unordered_map<std::string, Room> rooms;
-std::mutex                            roomsMutex;
+struct Room;
+struct Session {
+    SOCKET   sock;
+    int      id;
+    Room* room;
+};
 
-// 해당 방에 속한 모든 플레이어에게 메시지 전송
-void BroadcastInRoom(const Room& room)
-{
-    std::string data = room.id + "> ";
+struct Room {
+    std::string      id;
+    Session* creator;
+    Session* joiner;
+    char             creatorMove;
+    char             joinerMove;
+    bool             started;
 
-    // 결과 메시지는 'room.id> MSG\n' 형태로 전송
-    for (auto& kv : room.moves)
+    Room(const std::string& rid, Session* c)
+        : id(rid), creator(c),
+        joiner(nullptr),
+        creatorMove(0), joinerMove(0),
+        started(false)
     {
-        // 빼고 싶다면 키 클라이언트별 메시지 커스터마이즈 가능
     }
+};
 
-    // 임시: 방 아이디만 붙여 보내지 않음—개별 send로 직접 전송
+HANDLE                             g_hIOCP = NULL;
+LPFN_ACCEPTEX                      g_lpfnAcceptEx = nullptr;
+LPFN_GETACCEPTEXSOCKADDRS          g_lpfnGetAcceptExAddrs = nullptr;
+
+std::vector<HANDLE>                g_workerThreads;
+std::mutex                         g_sessionsLock;
+std::unordered_map<SOCKET, Session*> g_sessions;
+int                                g_nextSessionId = 1;
+
+std::mutex                         g_roomsLock;
+std::unordered_map<std::string, Room*> g_rooms;
+
+void ErrorExit(const char* msg) {
+    printf("%s: %d\n", msg, WSAGetLastError());
+    exit(1);
 }
 
-void SendToPlayer(SOCKET s, const std::string& msg)
-{
-    std::string data = msg + "\n";
-    send(s, data.c_str(), (int)data.size(), 0);
+void PostAccept(SOCKET listenSock) {
+    SOCKET clientSock = WSASocket(
+        AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
+
+    PER_IO_CONTEXT* ctx = new PER_IO_CONTEXT();
+    ZeroMemory(&ctx->overlapped, sizeof(OVERLAPPED));
+    ctx->wsaBuf.buf = ctx->buffer;
+    ctx->wsaBuf.len = MAX_BUFFER;
+    ctx->opType = IOAccept;
+    ctx->sock = clientSock;
+
+    DWORD bytes = 0;
+    BOOL ret = g_lpfnAcceptEx(
+        listenSock, clientSock,
+        ctx->buffer, 0,
+        sizeof(sockaddr_in) + 16, sizeof(sockaddr_in) + 16,
+        &bytes, &ctx->overlapped
+    );
+    if (!ret) {
+        int err = WSAGetLastError();
+        if (err != WSA_IO_PENDING) ErrorExit("AcceptEx");
+    }
 }
 
-// R/P/S 승부 판정
-// 리턴: 'A' → 첫 번째 이동자(win), 'B' → 두 번째 이동자(win), 'D' → 무승부
-char Judge(char a, char b)
-{
-    if (a == b)
-        return 'D';
-
-    if ((a == 'R' && b == 'S') ||
-        (a == 'S' && b == 'P') ||
-        (a == 'P' && b == 'R'))
-    {
-        return 'A';
+void PostRecv(Session* session, PER_IO_CONTEXT* ctx = nullptr) {
+    if (!ctx) {
+        ctx = new PER_IO_CONTEXT();
+        ZeroMemory(&ctx->overlapped, sizeof(OVERLAPPED));
+        ctx->wsaBuf.buf = ctx->buffer;
+        ctx->wsaBuf.len = MAX_BUFFER;
+        ctx->opType = IORead;
+        ctx->sock = session->sock;
     }
 
-    return 'B';
+    DWORD flags = 0, bytesRecv = 0;
+    int ret = WSARecv(
+        session->sock, &ctx->wsaBuf, 1,
+        &bytesRecv, &flags,
+        &ctx->overlapped, NULL
+    );
+    if (ret == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        if (err != WSA_IO_PENDING) ErrorExit("WSARecv");
+    }
 }
 
-// 클라이언트 전용 스레드 핸들러
-void HandleClient(SOCKET client)
-{
-    // 1) 입장 전 CREATE/JOIN 명령 처리
-    char    buf[256] = {};
-    int     len = recv(client, buf, sizeof(buf) - 1, 0);
+void PostSend(Session* session, const char* data, size_t len) {
+    PER_IO_CONTEXT* ctx = new PER_IO_CONTEXT();
+    ZeroMemory(&ctx->overlapped, sizeof(OVERLAPPED));
+    memcpy(ctx->buffer, data, len);
+    ctx->wsaBuf.buf = ctx->buffer;
+    ctx->wsaBuf.len = (ULONG)len;
+    ctx->opType = IOWrite;
+    ctx->sock = session->sock;
 
-    if (len <= 0)
-    {
-        closesocket(client);
-        return;
+    DWORD bytesSent = 0;
+    int ret = WSASend(
+        session->sock, &ctx->wsaBuf, 1,
+        &bytesSent, 0,
+        &ctx->overlapped, NULL
+    );
+    if (ret == SOCKET_ERROR) {
+        int err = WSAGetLastError();
+        if (err != WSA_IO_PENDING) ErrorExit("WSASend");
     }
-
-    std::string cmd(buf, len);
-
-    // 마지막 개행 제거
-    if (!cmd.empty() && cmd.back() == '\n')
-    {
-        cmd.pop_back();
-    }
-
-    auto splitPos = cmd.find(' ');
-    std::string action = (splitPos == std::string::npos)
-        ? cmd
-        : cmd.substr(0, splitPos);
-
-    std::string roomId = (splitPos == std::string::npos)
-        ? ""
-        : cmd.substr(splitPos + 1);
-
-    Room* roomPtr = nullptr;
-
-    {
-        std::lock_guard<std::mutex> lock(roomsMutex);
-
-        if (action == "CREATE")
-        {
-            // 같은 ID의 방이 있으면 에러
-            if (rooms.count(roomId))
-            {
-                SendToPlayer(client, "ERROR 방이 이미 존재합니다.");
-                closesocket(client);
-                return;
-            }
-
-            // 방 생성 후 입장
-            rooms[roomId] = Room{ roomId, { client }, {} };
-            roomPtr = &rooms[roomId];
-
-            SendToPlayer(client, "WAITING 방 생성 완료, 상대를 기다리는 중입니다.");
-
-            std::wcout << L"[서버] 방 " << roomId.c_str() << L" 생성, 대기 중\n";
-        }
-        else if (action == "JOIN")
-        {
-            // 방이 없거나 인원 초과 시 에러
-            auto it = rooms.find(roomId);
-
-            if (it == rooms.end())
-            {
-                SendToPlayer(client, "ERROR 해당 방이 없습니다.");
-                closesocket(client);
-                return;
-            }
-
-            if (it->second.players.size() >= 2)
-            {
-                SendToPlayer(client, "ERROR 방이 가득 찼습니다.");
-                closesocket(client);
-                return;
-            }
-
-            // 방 참여
-            it->second.players.push_back(client);
-            roomPtr = &it->second;
-
-            SendToPlayer(client, "OK 방 참여 완료");
-
-            std::wcout << L"[서버] 클라이언트 입장: 방 " << roomId.c_str() << L"\n";
-
-            // 두 명 모였으니 게임 시작
-            for (SOCKET p : roomPtr->players)
-            {
-                SendToPlayer(p, "OPPONENT_JOINED 상대가 입장했습니다!");
-                SendToPlayer(p, "START 가위바위보 시작! R/P/S 중 하나를 입력하세요.");
-            }
-        }
-        else
-        {
-            SendToPlayer(client, "ERROR 잘못된 명령입니다.");
-            closesocket(client);
-            return;
-        }
-    }
-
-    // 2) 입장 후 R/P/S 선택 및 결과 처리
-    while (true)
-    {
-        char ch;
-        std::string line;
-
-        // 한 줄 읽기
-        while (true)
-        {
-            int ret = recv(client, &ch, 1, 0);
-
-            if (ret <= 0)
-            {
-                goto CLEANUP;
-            }
-
-            if (ch == '\n')
-            {
-                break;
-            }
-
-            line.push_back(ch);
-        }
-
-        // MOVE 명령 인식
-        if (line.rfind("MOVE ", 0) == 0 && roomPtr)
-        {
-            char choice = line[5];
-
-            {
-                std::lock_guard<std::mutex> lock(roomsMutex);
-                roomPtr->moves[client] = choice;
-            }
-
-            SendToPlayer(client, std::string("OK 선택 입력: ") + choice);
-
-            // 두 명이 모두 선택했는지 확인
-            if (roomPtr->moves.size() == 2)
-            {
-                SOCKET p1 = roomPtr->players[0];
-                SOCKET p2 = roomPtr->players[1];
-                char   m1 = roomPtr->moves[p1];
-                char   m2 = roomPtr->moves[p2];
-
-                char result = Judge(m1, m2);
-
-                // 결과 메시지 작성
-                std::string msg1;
-                std::string msg2;
-
-                if (result == 'D')
-                {
-                    msg1 = "RESULT 무승부! 당신: ";
-                    msg2 = "RESULT 무승부! 당신: ";
-                }
-                else if (result == 'A')
-                {
-                    msg1 = "RESULT 승리! 당신: ";
-                    msg2 = "RESULT 패배! 당신: ";
-                }
-                else // 'B'
-                {
-                    msg1 = "RESULT 패배! 당신: ";
-                    msg2 = "RESULT 승리! 당신: ";
-                }
-
-                // "RESULT 승리! 당신: R 상대: S" 형태
-                msg1 += m1;
-                msg1 += " 상대: ";
-                msg1 += m2;
-
-                msg2 += m2;
-                msg2 += " 상대: ";
-                msg2 += m1;
-
-                // 양쪽 클라이언트에 전송
-                SendToPlayer(p1, msg1);
-                SendToPlayer(p2, msg2);
-
-                // 다음 라운드를 위해 선택 기록 삭제
-                {
-                    std::lock_guard<std::mutex> lock(roomsMutex);
-                    roomPtr->moves.clear();
-                }
-
-                // 다시 START 메시지로 재시작 안내
-                for (SOCKET p : roomPtr->players)
-                {
-                    SendToPlayer(p, "START 다음 라운드 시작! R/P/S 입력하세요.");
-                }
-            }
-        }
-        else
-        {
-            // 그 외 메시지는 방 내 전체에 브로드캐스트
-            std::lock_guard<std::mutex> lock(roomsMutex);
-
-            for (SOCKET p : roomPtr->players)
-            {
-                if (p != client)
-                {
-                    SendToPlayer(p, "CHAT " + line);
-                }
-            }
-        }
-    }
-
-CLEANUP:
-
-    // 클라이언트 연결 종료 처리
-    {
-        std::lock_guard<std::mutex> lock(roomsMutex);
-
-        if (roomPtr)
-        {
-            auto& vec = roomPtr->players;
-            vec.erase(std::remove(vec.begin(), vec.end(), client),
-                vec.end());
-
-            // 방이 비면 삭제
-            if (vec.empty())
-            {
-                rooms.erase(roomPtr->id);
-                std::wcout << L"[서버] 방 " << roomId.c_str() << L" 삭제\n";
-            }
-        }
-    }
-
-    closesocket(client);
 }
 
-int main()
-{
-    WSADATA wsa;
+// RPS 결과 계산:  0=무승부, 1=첫번째가 이김, -1=두번째가 이김
+int ResolveRPS(char a, char b) {
+    if (a == b) return 0;
+    if ((a == 'R' && b == 'S') || (a == 'S' && b == 'P') || (a == 'P' && b == 'R'))
+        return 1;
+    return -1;
+}
 
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+DWORD WINAPI WorkerThread(LPVOID) {
+    DWORD       bytesTransferred;
+    ULONG_PTR   key;
+    OVERLAPPED* overlapped;
 
-    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    while (true) {
+        BOOL ok = GetQueuedCompletionStatus(
+            g_hIOCP, &bytesTransferred, &key,
+            &overlapped, INFINITE
+        );
 
-    sockaddr_in addr = {};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(12345);
+        Session* session = (Session*)key;
+        PER_IO_CONTEXT* ctx = CONTAINING_RECORD(
+            overlapped,
+            PER_IO_CONTEXT,
+            overlapped
+        );
 
-    bind(listener, (sockaddr*)&addr, sizeof(addr));
-    listen(listener, SOMAXCONN);
-
-    std::cout << "[RSP GAME 서버 시작]..."<< std::endl;
-
-    while (true)
-    {
-        SOCKET client = accept(listener, nullptr, nullptr);
-
-        if (client == INVALID_SOCKET)
-        {
+        if (!ok || (bytesTransferred == 0 && ctx->opType != IOAccept)) {
+            // 연결 끊김 처리
+            if (session) {
+                std::lock_guard<std::mutex> lock(g_sessionsLock);
+                closesocket(session->sock);
+                g_sessions.erase(session->sock);
+                delete session;
+            }
+            delete ctx;
             continue;
         }
 
-        std::cout << "[서버] 클라이언트 연결 socket: " << client << std::endl;
+        switch (ctx->opType)
+        {
+        case IOAccept:
+        {
+            setsockopt(
+                ctx->sock,
+                SOL_SOCKET,
+                SO_UPDATE_ACCEPT_CONTEXT,
+                (char*)&g_listenSock,
+                sizeof(g_listenSock)
+            );
 
-        std::thread(HandleClient, client).detach();
+            printf("Client connected: %d\n", ctx->sock);
+
+            // 새 클라이언트 세션
+            Session* newSession = new Session{ ctx->sock, g_nextSessionId++, nullptr };
+            {
+                std::lock_guard<std::mutex> lock(g_sessionsLock);
+                g_sessions[newSession->sock] = newSession;
+            }
+            CreateIoCompletionPort((HANDLE)newSession->sock, g_hIOCP, (ULONG_PTR)newSession, 0);
+
+            // 최초 WSARecv 요청
+            PostRecv(newSession);
+
+            // 다음 클라이언트 대기
+            PostAccept((SOCKET)key);
+            delete ctx;
+        } break;
+
+        case IORead: {
+            // 수신된 메시지
+            std::string msg(ctx->buffer, bytesTransferred);
+            // 개행 문자 제거
+            while (!msg.empty() && (msg.back() == '\n' || msg.back() == '\r'))
+                msg.pop_back();
+
+            // 명령어와 인자 분리
+            std::string cmd, arg;
+            size_t sp = msg.find(' ');
+            if (sp != std::string::npos) {
+                cmd = msg.substr(0, sp);
+                arg = msg.substr(sp + 1);
+            }
+            else {
+                cmd = msg;
+            }
+
+            if (cmd == "CREATE") {
+                std::lock_guard<std::mutex> lock(g_roomsLock);
+                if (g_rooms.count(arg)) {
+                    const char* err = "ERROR Room already exists\n";
+                    PostSend(session, err, strlen(err));
+                }
+                else {
+                    Room* room = new Room(arg, session);
+                    session->room = room;
+                    g_rooms[arg] = room;
+                    const char* waiting = "Waiting for User...\n";
+                    PostSend(session, waiting, strlen(waiting));
+                }
+            }
+            else if (cmd == "JOIN") {
+                std::lock_guard<std::mutex> lock(g_roomsLock);
+                auto it = g_rooms.find(arg);
+                if (it == g_rooms.end()) {
+                    const char* err = "ERROR No such room\n";
+                    PostSend(session, err, strlen(err));
+                }
+                else {
+                    Room* room = it->second;
+                    if (room->joiner) {
+                        const char* err = "ERROR Room full\n";
+                        PostSend(session, err, strlen(err));
+                    }
+                    else {
+                        room->joiner = session;
+                        session->room = room;
+                        room->started = true;
+                        // 양쪽에 상대 입장 알림
+                        const char* joined = "OPPONENT_JOINED\n";
+                        PostSend(room->creator, joined, strlen(joined));
+                        PostSend(room->joiner, joined, strlen(joined));
+                        // 게임 시작 알림
+                        const char* start = "START\n";
+                        PostSend(room->creator, start, strlen(start));
+                        PostSend(room->joiner, start, strlen(start));
+                    }
+                }
+            }
+            else if (cmd == "MOVE") {
+                Room* room = session->room;
+                if (!room || !room->started) {
+                    const char* err = "ERROR Game not started\n";
+                    PostSend(session, err, strlen(err));
+                }
+                else {
+                    char m = toupper(arg.empty() ? '?' : arg[0]);
+                    if (session == room->creator) {
+                        room->creatorMove = m;
+                    }
+                    else {
+                        room->joinerMove = m;
+                    }
+                    // 모두 제출했으면 결과 계산
+                    if (room->creatorMove && room->joinerMove) {
+                        int res = ResolveRPS(
+                            room->creatorMove,
+                            room->joinerMove
+                        );
+                        // creator에게
+                        if (res == 0) {
+                            const char* r = "RESULT DRAW\n";
+                            PostSend(room->creator, r, strlen(r));
+                            PostSend(room->joiner, r, strlen(r));
+                        }
+                        else if (res == 1) {
+                            const char* win = "RESULT WIN\n";
+                            const char* lose = "RESULT LOSE\n";
+                            PostSend(room->creator, win, strlen(win));
+                            PostSend(room->joiner, lose, strlen(lose));
+                        }
+                        else {
+                            const char* win = "RESULT WIN\n";
+                            const char* lose = "RESULT LOSE\n";
+                            PostSend(room->creator, lose, strlen(lose));
+                            PostSend(room->joiner, win, strlen(win));
+                        }
+                        // 방 제거
+                        std::lock_guard<std::mutex> lock(g_roomsLock);
+                        g_rooms.erase(room->id);
+                        delete room;
+                    }
+                }
+            }
+            else {
+                // 알 수 없는 명령
+                const char* err = "ERROR Unknown command\n";
+                PostSend(session, err, strlen(err));
+            }
+
+            // 다음 수신 준비
+            PostRecv(session, ctx);
+        } break;
+
+        case IOWrite: {
+            delete ctx;
+        } break;
+        }
+    }
+    return 0;
+}
+
+int main() {
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
+        ErrorExit("WSAStartup");
+
+    // 리슨 소켓
+    SOCKET listenSock = WSASocket(
+        AF_INET, SOCK_STREAM, IPPROTO_TCP,
+        NULL, 0, WSA_FLAG_OVERLAPPED
+    );
+
+    // AcceptEx 함수 포인터 로딩
+    GUID guidAcceptEx = WSAID_ACCEPTEX;
+    GUID guidGetAddrs = WSAID_GETACCEPTEXSOCKADDRS;
+    DWORD bytes = 0;
+    WSAIoctl(
+        listenSock, SIO_GET_EXTENSION_FUNCTION_POINTER,
+        &guidAcceptEx, sizeof(guidAcceptEx),
+        &g_lpfnAcceptEx, sizeof(g_lpfnAcceptEx),
+        &bytes, NULL, NULL
+    );
+    WSAIoctl(
+        listenSock, SIO_GET_EXTENSION_FUNCTION_POINTER,
+        &guidGetAddrs, sizeof(guidGetAddrs),
+        &g_lpfnGetAcceptExAddrs, sizeof(g_lpfnGetAcceptExAddrs),
+        &bytes, NULL, NULL
+    );
+
+    sockaddr_in servAddr = {};
+    servAddr.sin_family = AF_INET;
+    servAddr.sin_addr.s_addr = INADDR_ANY;
+    servAddr.sin_port = htons(PORT);
+    bind(listenSock, (sockaddr*)&servAddr, sizeof(servAddr));
+    listen(listenSock, SOMAXCONN);
+
+    // IOCP 생성 및 리슨 소켓 등록
+    g_hIOCP = CreateIoCompletionPort(
+        INVALID_HANDLE_VALUE, NULL, 0, 0
+    );
+    CreateIoCompletionPort(
+        (HANDLE)listenSock, g_hIOCP,
+        (ULONG_PTR)listenSock, 0
+    );
+
+    // 워커 스레드
+    for (int i = 0; i < THREAD_COUNT; i++) {
+        g_workerThreads.push_back(
+            CreateThread(NULL, 0, WorkerThread, NULL, 0, NULL)
+        );
     }
 
-    closesocket(listener);
-    WSACleanup();
+    printf("IOCP RPS 서버 시작: 포트 %d\n", PORT);
+    PostAccept(listenSock);
 
+    WaitForMultipleObjects(
+        (DWORD)g_workerThreads.size(),
+        g_workerThreads.data(),
+        TRUE, INFINITE
+    );
+
+    closesocket(listenSock);
+    WSACleanup();
     return 0;
 }

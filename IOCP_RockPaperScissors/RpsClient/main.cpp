@@ -3,7 +3,6 @@
 #include <windows.h>
 #include <iostream>
 #include <string>
-#include <thread>
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -39,7 +38,6 @@ SOCKET ConnectToServer(const std::string& ip, int port)
         closesocket(s);
         return INVALID_SOCKET;
     }
-
     return s;
 }
 
@@ -63,112 +61,143 @@ bool ReadLine(SOCKET s, std::string& out)
     return true;
 }
 
-int main()
+// =================================================================
+// 게임 플레이를 동기적으로 처리하는 함수
+// RESULT 메시지를 받는 순간 즉시 반환되어 상위 메뉴로 복귀
+// =================================================================
+void PlayGameSession(SOCKET sock)
 {
-    WSADATA wsa;
-    WSAStartup(MAKEWORD(2, 2), &wsa);
+    std::string line;
 
-    std::string input;
-    std::string roomId;
-    std::string initialCmd;
-    SOCKET sock = INVALID_SOCKET;
-
-    // 1) 메인 메뉴 처리
-    while (true)
+    // 1) 대기/시작 메시지 처리
+    while (ReadLine(sock, line))
     {
-        ShowMainMenu();
-        std::getline(std::cin, input);
+        std::cout << "[서버] " << line << "\n";
 
-        if (input == "1")
+        if (line == "OPPONENT_JOINED")
+            std::cout << "*** 상대가 입장했습니다! ***\n";
+        else if (line == "START")
         {
-            // 게임시작 선택
-            ShowGameStartMenu();
-            std::getline(std::cin, input);
-
-            if (input == "1" || input == "2")
-            {
-                std::cout << "\n방 ID를 입력하세요> ";
-                std::getline(std::cin, roomId);
-
-                if (input == "1")
-                    initialCmd = "CREATE " + roomId;
-                else
-                    initialCmd = "JOIN " + roomId;
-
-                break;
-            }
-            else
-            {
-                std::cout << "[잘못된 선택]\n\n";
-            }
-        }
-        else if (input == "2")
-        {
-            std::cout << "\n[회원 가입은 추후 구현 예정입니다]\n\n";
-        }
-        else if (input == "3")
-        {
-            std::cout << "\n[랭킹 보기는 추후 구현 예정입니다]\n\n";
-        }
-        else
-        {
-            std::cout << "[잘못된 선택입니다. 다시 시도해주세요.]\n\n";
+            std::cout << "*** 게임 시작! MOVE R/P/S 입력 ***\n";
+            break;
         }
     }
 
-    // 2) 서버 연결 및 초기 명령 전송
-    sock = ConnectToServer("127.0.0.1", 12345);
-    if (sock == INVALID_SOCKET)
-    {
-        std::cerr << "서버 연결 실패\n";
-        WSACleanup();
-        return 1;
-    }
-    SendLine(sock, initialCmd);
-
-    // 3) 서버 응답 비동기 수신
-    std::thread receiver([&]()
-        {
-            std::string line;
-            while (ReadLine(sock, line))
-            {
-                std::cout << "[서버] " << line << "\n";
-
-                if (line == "START")
-                {
-                    std::cout << "*** 게임 시작! MOVE R/P/S 형식으로 입력 ***\n";
-                }
-                else if (line == "OPPONENT_JOINED")
-                {
-                    std::cout << "*** 상대가 입장했습니다! ***\n";
-                }
-            }
-        });
-    receiver.detach();
-
-    // 4) 사용자 입력 루프 (MOVE 명령 처리)
+    // 2) 사용자 입력 → MOVE 전송 → 서버 응답(RESULT) 대기
     while (true)
     {
+        std::string input;
         std::cout << "> ";
         std::getline(std::cin, input);
         if (input.empty()) continue;
-        if (input == "QUIT") break;
 
+        // MOVE 명령으로 변환
         if (input.size() == 1 &&
             (input == "R" || input == "P" || input == "S"))
         {
             input = "MOVE " + input;
         }
 
+        // 전송 실패 시 세션 종료
         if (!SendLine(sock, input))
+            return;
+
+        // 서버로부터 RESULT를 받을 때까지 반복
+        while (ReadLine(sock, line))
         {
-            std::cerr << "서버로 전송 실패\n";
-            break;
+            std::cout << "[서버] " << line << "\n";
+
+            // RESULT 메시지를 받으면 함수 종료
+            if (line.rfind("RESULT", 0) == 0)
+                return;
         }
+        break;
+    }
+}
+
+int main()
+{
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0)
+    {
+        std::cerr << "WSAStartup 실패\n";
+        return 1;
     }
 
-    // 5) 정리
-    closesocket(sock);
+    // 1) 메인 메뉴
+    std::string input;
+    while (true)
+    {
+        ShowMainMenu();
+        std::getline(std::cin, input);
+
+        if (input == "1") break;
+        if (input == "2")
+            std::cout << "\n[회원 가입은 추후 구현 예정입니다]\n\n";
+        else if (input == "3")
+            std::cout << "\n[랭킹 보기는 추후 구현 예정입니다]\n\n";
+        else
+            std::cout << "[잘못된 선택입니다. 다시 시도해주세요.]\n\n";
+    }
+
+    // 2) 방 만들기/참여 및 게임 세션 루프
+    while (true)
+    {
+        SOCKET sock = INVALID_SOCKET;
+        std::string roomId, initialCmd, serverLine;
+
+        // 2-1) CREATE/JOIN 초기 핸드셰이크
+        while (true)
+        {
+        RETRY_GAMESTART:
+            ShowGameStartMenu();
+            std::getline(std::cin, input);
+
+            if (input != "1" && input != "2")
+            {
+                std::cout << "[잘못된 선택]\n\n";
+                continue;
+            }
+
+            std::cout << "\n방 ID를 입력하세요> ";
+            std::getline(std::cin, roomId);
+
+            initialCmd = (input == "1") ? "CREATE " + roomId
+                : "JOIN " + roomId;
+            sock = ConnectToServer("127.0.0.1", 9000);
+            if (sock == INVALID_SOCKET)
+            {
+                std::cerr << "서버 연결 실패\n";
+                WSACleanup();
+                return 1;
+            }
+
+            if (!SendLine(sock, initialCmd) || !ReadLine(sock, serverLine))
+            {
+                std::cerr << "초기 명령 전송/응답 실패\n";
+                closesocket(sock);
+                WSACleanup();
+                return 1;
+            }
+
+            std::cout << "[서버] " << serverLine << "\n";
+            if (serverLine.rfind("ERROR", 0) == 0)
+            {
+                closesocket(sock);
+                std::cout << "[INFO] 다시 선택하세요\n\n";
+                goto RETRY_GAMESTART;
+            }
+            break;  // 방 생성/참여 성공
+        }
+
+        // 2-2) 실제 게임 플레이
+        PlayGameSession(sock);
+
+        // 2-3) 세션 정리 및 메뉴 복귀
+        closesocket(sock);
+        std::cout << "\n[INFO] 게임이 종료되었습니다. 다시 방 만들기/참여 메뉴로 돌아갑니다.\n";
+    }
+
     WSACleanup();
     return 0;
 }

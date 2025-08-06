@@ -1,78 +1,49 @@
-// src/PacketManager.cpp
 #include "PacketManager.h"
-#include <sstream>
-#include <algorithm>
-#include <cctype>
+#include <cstring>
 
-namespace PacketManager
+bool PacketManager::Parse( const char* buffer, size_t size, PacketHeader& outHeader, std::vector<char>& outPayload)
 {
-
-    // 대소문자 무시 비교
-    static bool iequals(const std::string& a, const std::string& b) 
+    // 헤더 크기 검사
+    if (size < sizeof(PacketHeader))
     {
-        if (a.size() != b.size()) return false;
-        for (size_t i = 0; i < a.size(); ++i) 
-        {
-            if (std::tolower(a[i]) != std::tolower(b[i]))
-            {
-                return false;
-            }
-        }
-        return true;
+        return false;
     }
 
-    Packet parse(const std::string& raw) 
+    // 헤더 복사
+    std::memcpy(&outHeader, buffer, sizeof(PacketHeader));
+
+    // payload 길이 검사
+    size_t bodyLen = outHeader.m_length;
+    if (size < sizeof(PacketHeader) + bodyLen)
     {
-        std::istringstream iss(raw);
-        std::string cmd;
-        iss >> cmd;
-
-        Packet pkt;
-        if (iequals(cmd, "REGISTER"))           pkt.type = PacketType::REGISTER;
-        else if (iequals(cmd, "LOGIN"))         pkt.type = PacketType::LOGIN;
-        else if (iequals(cmd, "CREATE"))        pkt.type = PacketType::CREATE;
-        else if (iequals(cmd, "JOIN"))          pkt.type = PacketType::JOIN;
-        else if (iequals(cmd, "MOVE"))          pkt.type = PacketType::MOVE;
-        else if (iequals(cmd, "RESULT"))        pkt.type = PacketType::RESULT;
-        else if (iequals(cmd, "OPPONENT_JOINED")) pkt.type = PacketType::OPPONENT_JOINED;
-        else if (iequals(cmd, "START"))         pkt.type = PacketType::START;
-        else if (iequals(cmd, "ERROR"))         pkt.type = PacketType::ERROR_PKT;
-        else                                     pkt.type = PacketType::UNKNOWN;
-
-        std::string token;
-        while (iss >> token) 
-        {
-            pkt.args.push_back(token);
-        }
-        return pkt;
+        return false;
     }
 
-    std::string serialize(const Packet& pkt) 
-    {
-        auto toString = [](PacketType t) 
-            {
-            switch (t)
-            {
-            case PacketType::REGISTER:        return "REGISTER";
-            case PacketType::LOGIN:           return "LOGIN";
-            case PacketType::CREATE:          return "CREATE";
-            case PacketType::JOIN:            return "JOIN";
-            case PacketType::MOVE:            return "MOVE";
-            case PacketType::RESULT:          return "RESULT";
-            case PacketType::OPPONENT_JOINED: return "OPPONENT_JOINED";
-            case PacketType::START:           return "START";
-            case PacketType::ERROR_PKT:       return "ERROR";
-            default:                          return "UNKNOWN";
-            }
-            };
+    // payload 분리
+    outPayload.assign(
+        buffer + sizeof(PacketHeader),
+        buffer + sizeof(PacketHeader) + bodyLen);
 
-        std::string out = toString(pkt.type);
-        for (const auto& arg : pkt.args) 
-        {
-            out += " " + arg;
-        }
-        out += "\n";
-        return out;
-    }
+    return true;
+}
 
-}  // namespace PacketManager
+std::vector<char> PacketManager::Build(
+    PacketType               type,
+    const std::vector<char>& payload)
+{
+    PacketHeader header;
+    header.m_type = type;
+    header.m_length = static_cast<uint16_t>(payload.size());
+
+    // 헤더 + payload 크기 만큼 버퍼 할당
+    std::vector<char> buf(sizeof(PacketHeader) + payload.size());
+
+    // 헤더, payload 복사
+    std::memcpy(buf.data(), &header, sizeof(header));
+    std::memcpy(
+        buf.data() + sizeof(header),
+        payload.data(),
+        payload.size());
+
+    return buf;
+}

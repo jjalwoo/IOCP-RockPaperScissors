@@ -1,35 +1,46 @@
 #pragma once
-#include <string>
+#include <cstdint>
 #include <vector>
 
-namespace PacketManager 
+/*
+ PacketManager
+  - 네트워크 I/O로 주고받는 패킷의
+    직렬화/역직렬화를 담당한다.
+*/
+enum class PacketType : uint8_t
 {
+    AcceptRoom,
+    JoinRoom,
+    Move,
+    Result,
+    // …추가 가능
+};
 
-    enum class PacketType 
-    {
-        REGISTER,
-        LOGIN,
-        CREATE, 
-        JOIN,
-        MOVE, 
-        RESULT,
-        OPPONENT_JOINED, 
-        START, 
-        ERROR_PKT, 
-        UNKNOWN, 
-        WAITING     // 대기 화면으로 이동
-    };
+struct PacketHeader
+{
+    PacketType m_type;   // 패킷 종류
+    uint16_t   m_length; // payload 길이
+};
 
-    struct Packet 
-    {
-        PacketType type;
-        std::vector<std::string> args;
-    };
+class PacketManager
+{
+public:
+    /*
+     Parse
+      - raw buffer에서 헤더와 payload를 분리해준다.
+      - size가 부족하면 false 반환.
+    */
+    static bool Parse(
+        const char* buffer,
+        size_t              size,
+        PacketHeader& outHeader,
+        std::vector<char>& outPayload);
 
-    // 원시 문자열 → Packet
-    Packet parse(const std::string& raw);
-
-    // Packet → 전송용 문자열 (끝에 '\n' 포함)
-    std::string serialize(const Packet& pkt);
-
-}
+    /*
+     Build
+      - 헤더+payload를 붙여 전송용 버퍼를 만든다.
+    */
+    static std::vector<char> Build(
+        PacketType              type,
+        const std::vector<char>& payload);
+};

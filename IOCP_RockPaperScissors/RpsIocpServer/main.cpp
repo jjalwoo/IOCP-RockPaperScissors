@@ -19,6 +19,7 @@ int main()
     }
 
     // MySQL 데이터베이스 연결 초기화
+	// rpsgame_db 데이터베이스에 연결
     if (!dbManager.Initialize(dbConfig.host, dbConfig.user, dbConfig.password, dbConfig.dbname, dbConfig.port))
     {
         return -1;

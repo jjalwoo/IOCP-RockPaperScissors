@@ -387,6 +387,38 @@ void IOCPManager::HandleRead(PerIOContext* ctx, DWORD bytesTransferred, Session*
         return;
     }
 
+    // STATS 전적 조회
+    if (cmd == "STATS")
+    {
+        // 세션에 저장된 로그인된 사용자 ID 가져오기
+        int uid = session->GetUserId();
+
+        // user_status 테이블에서 각 통계 조회
+        int played = 0, wins = 0, draws = 0, losses = 0;
+        m_dbMgr->ExecuteScalarInt(
+            "SELECT games_played FROM user_status WHERE user_id=" + std::to_string(uid),
+            played);
+        m_dbMgr->ExecuteScalarInt(
+            "SELECT wins FROM user_status WHERE user_id=" + std::to_string(uid),
+            wins);
+        m_dbMgr->ExecuteScalarInt(
+            "SELECT draws FROM user_status WHERE user_id=" + std::to_string(uid),
+            draws);
+        m_dbMgr->ExecuteScalarInt(
+            "SELECT losses FROM user_status WHERE user_id=" + std::to_string(uid),
+            losses);
+
+        // "STATS played wins draws losses\n" 형식으로 클라이언트에 전송
+        std::ostringstream os;
+        os << "STATS " << played << " " << wins << " " << draws << " " << losses << "\n";
+        std::string out = os.str();
+        session->Send(out.c_str(), out.size());
+
+        // 다음 명령 대기
+        PostRecv(session, ctx);
+        return;
+    }
+
     // CREATE
     if (cmd == "CREATE")
     {

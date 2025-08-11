@@ -4,6 +4,10 @@
 #include <iostream>
 #include <string>
 #include <conio.h>    // _getch()
+#include <sstream>    // for parsing
+#include <vector>
+#include <conio.h>    // for _getch()
+
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -16,7 +20,7 @@ void ShowMainMenu()
     std::cout << "<가위바위보 게임>\n";
     std::cout << "1. 게임시작\n";
     std::cout << "2. 회원 가입\n";
-    std::cout << "3. 랭킹 보기\n";
+    std::cout << "3. 전적 보기\n";
     std::cout << "선택하세요> ";
 }
 
@@ -205,6 +209,71 @@ bool ClientLogin(SOCKET& outSock)
     return false;
 }
 
+//  전적 보기: 로그인 → STATS 요청 → 결과 파싱/출력
+bool ClientStats()
+{
+    std::string username, password;
+
+    std::cout << "\n[전적 보기] 로그인하세요\n";
+
+    std::cout << "ID> ";
+    std::getline(std::cin, username);
+
+    std::cout << "PW> ";
+    std::getline(std::cin, password);
+
+    // 서버 연결
+    SOCKET sock = ConnectToServer("127.0.0.1", 9000);
+    if (sock == INVALID_SOCKET)
+    {
+        std::cerr << "서버 연결 실패\n";
+        return false;
+    }
+
+    // 로그인 시도
+    SendLine(sock, "LOGIN " + username + " " + password);
+
+    std::string resp;
+    if (!ReadLine(sock, resp) || resp != "LOGIN_SUCCESS")
+    {
+        std::cout << "로그인 실패. 아무키나 누르면 메인메뉴로 돌아갑니다.\n";
+        _getch();
+        closesocket(sock);
+        return false;
+    }
+
+    // 전적 요청
+    SendLine(sock, "STATS");
+
+    if (ReadLine(sock, resp))
+    {
+        // "STATS <played> <wins> <draws> <losses>"
+        std::istringstream iss(resp);
+        std::string tag;
+        int played, wins, draws, losses;
+
+        iss >> tag >> played >> wins >> draws >> losses;
+
+        if (tag == "STATS")
+        {
+            std::cout << "\n=== 전적 ===\n";
+            std::cout << "게임 수: " << played << "\n";
+            std::cout << "승   리: " << wins << "\n";
+            std::cout << "무   승: " << draws << "\n";
+            std::cout << "패   배: " << losses << "\n\n";
+        }
+        else
+        {
+            std::cout << "전적 불러오기 실패: " << resp << "\n";
+        }
+    }
+
+    std::cout << "아무키나 누르면 메인메뉴로 돌아갑니다.\n";
+    _getch();
+
+    closesocket(sock);
+    return true;
+}
 
 int main()
 {
@@ -286,7 +355,7 @@ int main()
         }
         else if (input == "3")
         {
-            std::cout << "\n[랭킹 보기는 추후 구현 예정입니다]\n\n";
+            ClientStats();    // 전적 보기
         }
         else
         {
@@ -317,7 +386,7 @@ int main()
             std::cout << "\n방 ID를 입력하세요> ";
             std::getline(std::cin, roomId);
 
-            initialCmd = (input == "1") ? "CREATE " + roomId
+            initialCmd = (input == "1") ? "CREATE " + roomId 
                 : "JOIN " + roomId;
             sock = ConnectToServer("127.0.0.1", 9000);
             if (sock == INVALID_SOCKET)

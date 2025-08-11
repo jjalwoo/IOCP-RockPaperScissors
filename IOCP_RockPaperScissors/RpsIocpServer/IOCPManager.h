@@ -7,6 +7,8 @@
 #include <vector>
 #include <unordered_map>
 #include <mutex>
+#include "DatabaseManager.h"
+
 #pragma comment(lib, "Ws2_32.lib")
 
 
@@ -31,7 +33,7 @@ public:
       - AcceptEx 함수 로딩, IOCP 생성과 listen 소켓 등록
       - 워커 스레드 기동
     */
-    bool Initialize(uint16_t port, int workerCount);
+    bool Initialize(uint16_t port, int workerCount, DatabaseManager* dbMgr);
 
     /*
      Run
@@ -55,6 +57,9 @@ private:
 
     // I/O 작업 구분
     enum class IOOperation { Accept, Read, Write };
+
+    // DB 매니저 포인터
+    DatabaseManager* m_dbMgr;
 
     // OVERLAPPED 기반 I/O 컨텍스트
     struct PerIOContext

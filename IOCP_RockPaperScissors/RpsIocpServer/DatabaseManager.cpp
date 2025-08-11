@@ -84,6 +84,60 @@ void DatabaseManager::ExecuteQuery(const std::string& query)
     mysql_free_result(result);
 }
 
+// 단일 정수 반환 쿼리 처리
+bool DatabaseManager::ExecuteScalarInt(const std::string& query, int& outValue)
+{
+    if (mysql_query(m_conn, query.c_str()))
+    {
+        std::cerr << "[DatabaseManager] ExecuteScalarInt 실패: "
+            << mysql_error(m_conn) << "\n";
+        return false;
+    }
+
+    MYSQL_RES* result = mysql_store_result(m_conn);
+    if (!result)
+    {
+        std::cerr << "[DatabaseManager] ExecuteScalarInt 결과 저장 실패: "
+            << mysql_error(m_conn) << "\n";
+        return false;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(result);
+    if (row && row[0])
+    {
+        outValue = std::atoi(row[0]);
+    }
+    else
+    {
+        outValue = 0;
+    }
+
+    mysql_free_result(result);
+    return true;
+}
+
+// 마지막 INSERT된 AUTO_INCREMENT ID 반환
+unsigned long DatabaseManager::GetLastInsertId() const
+{
+    return static_cast<unsigned long>(mysql_insert_id(m_conn));
+}
+
+// users 테이블에 username 중복 여부 확인
+bool DatabaseManager::UserExists(const std::string& username)
+{
+    int count = 0;
+    std::string q = "SELECT COUNT(*) FROM users WHERE username = '"
+        + username + "'";
+
+    if (!ExecuteScalarInt(q, count))
+    {
+        return false;  // 쿼리 실패 시, 존재하지 않는 걸로 간주
+    }
+
+    return (count > 0);
+}
+
+
 void DatabaseManager::Shutdown()
 {
     if (m_conn)

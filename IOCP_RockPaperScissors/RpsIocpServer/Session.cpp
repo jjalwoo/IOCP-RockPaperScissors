@@ -23,6 +23,22 @@ int Session::GetId() const
     return m_id;
 }
 
+void Session::SetUserId(int userId)
+{
+    m_userId = userId;
+}
+
+int Session::GetUserId() const
+{
+    return m_userId;
+}
+
+bool Session::IsAuthenticated() const
+{
+    return m_userId > 0;
+}
+
+
 void Session::SetRoom(Room* room)
 {
     m_room = room;

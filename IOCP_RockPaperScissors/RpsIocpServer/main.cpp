@@ -26,10 +26,10 @@ int main()
     }
 
     // 포트 9000, 워커 스레드 4개로 초기화
-    if (!server.Initialize(9000, 4))
+    if (!server.Initialize(9000, 4, &dbManager))     // ---수정---
     {
         return -1;
-    }	
+    }
 
     // 서버 실행 (워커 스레드 대기)
     server.Run();

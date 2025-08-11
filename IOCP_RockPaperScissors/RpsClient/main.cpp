@@ -3,8 +3,13 @@
 #include <windows.h>
 #include <iostream>
 #include <string>
+#include <conio.h>    // _getch()
 
 #pragma comment(lib, "ws2_32.lib")
+
+static SOCKET ConnectToServer(const std::string& ip, int port);
+static bool   ClientRegister();
+static bool   ClientLogin(SOCKET& outSock);
 
 void ShowMainMenu()
 {
@@ -115,6 +120,92 @@ void PlayGameSession(SOCKET sock)
     }
 }
 
+// 회원가입 처리
+bool ClientRegister()
+{
+    std::string username, password;
+
+    std::cout << "\n[회원 가입]\n";
+    std::cout << "ID> ";
+    std::getline(std::cin, username);
+    std::cout << "PW> ";
+    std::getline(std::cin, password);
+
+    SOCKET sock = ConnectToServer("127.0.0.1", 9000);
+    if (sock == INVALID_SOCKET)
+    {
+        std::cerr << "서버 연결 실패\n";
+        return false;
+    }
+
+    // REGISTER username password\n 전송
+    SendLine(sock, "REGISTER " + username + " " + password);
+
+    std::string resp;
+    if (ReadLine(sock, resp))
+    {
+        if (resp == "ERROR DUPLICATE_USER")
+        {
+            std::cout << "ID가 중복되었습니다.\n\n";
+        }
+        else if (resp == "REGISTER_SUCCESS")
+        {
+            std::cout << "회원 가입이 완료되었습니다. 아무키나 입력하시면 메인메뉴로 돌아갑니다.\n";
+            _getch();
+        }
+        else
+        {
+            std::cout << "가입 중 오류 발생: " << resp << "\n";
+        }
+    }
+
+    closesocket(sock);
+    std::cout << "\n";
+    return true;
+}
+
+// 로그인 처리 (성공 시 outSock에 연결 소켓 리턴)
+bool ClientLogin(SOCKET& outSock)
+{
+    std::string username, password;
+
+    std::cout << "\n[로그인]\n";
+    std::cout << "ID> ";
+    std::getline(std::cin, username);
+    std::cout << "PW> ";
+    std::getline(std::cin, password);
+
+    SOCKET sock = ConnectToServer("127.0.0.1", 9000);
+    if (sock == INVALID_SOCKET)
+    {
+        std::cerr << "서버 연결 실패\n";
+        return false;
+    }
+
+    SendLine(sock, "LOGIN " + username + " " + password);
+
+    std::string resp;
+    if (ReadLine(sock, resp))
+    {
+        if (resp == "LOGIN_SUCCESS")
+        {
+            std::cout << "로그인 성공! 게임 시작 메뉴로 이동합니다.\n\n";
+            outSock = sock;
+            return true;
+        }
+        else
+        {
+            std::cout << "잘못 입력했습니다. 다시 확인해주세요.\n아무키나 입력하시면 메인메뉴로 돌아갑니다.\n";
+            _getch();
+        }
+    }
+
+    closesocket(sock);
+    std::cout << "\n";
+    return false;
+}
+
+
 int main()
 {
     WSADATA wsa;
@@ -131,13 +222,77 @@ int main()
         ShowMainMenu();
         std::getline(std::cin, input);
 
-        if (input == "1") break;
-        if (input == "2")
-            std::cout << "\n[회원 가입은 추후 구현 예정입니다]\n\n";
+        if (input == "1")
+        {
+            // 로그인 시도
+            SOCKET gameSock;
+            if (!ClientLogin(gameSock))
+            {
+                continue;   // 로그인 실패 시 메인으로
+            }
+
+            // 로그인 성공하면 방 만들기/참여 루프 수행
+            while (true)
+            {
+                ShowGameStartMenu();
+                std::getline(std::cin, input);
+
+                if (input != "1" && input != "2")
+                {
+                    std::cout << "[잘못된 선택]\n\n";
+                    continue;
+                }
+
+                std::string roomId;
+                std::cout << "\n방 ID를 입력하세요> ";
+                std::getline(std::cin, roomId);
+
+                std::string initialCmd =
+                    (input == "1") ? "CREATE " + roomId
+                    : "JOIN " + roomId;
+
+                if (!SendLine(gameSock, initialCmd))
+                {
+                    closesocket(gameSock);
+                    break;  // 서버 연결 문제 시 재로그인
+                }
+
+                std::string serverLine;
+                if (!ReadLine(gameSock, serverLine))
+                {
+                    closesocket(gameSock);
+                    break;
+                }
+
+                std::cout << "[서버] " << serverLine << "\n";
+                if (serverLine.rfind("ERROR", 0) == 0)
+                {
+                    std::cout << "[INFO] 다시 선택하세요\n\n";
+                    continue;
+                }
+
+                // 실제 게임
+                PlayGameSession(gameSock);
+            }
+
+            closesocket(gameSock);
+            continue;   // 메인 메뉴로
+
+        }
+        else if (input == "2")
+        {
+            ClientRegister();
+            continue;
+        }
         else if (input == "3")
+        {
             std::cout << "\n[랭킹 보기는 추후 구현 예정입니다]\n\n";
+        }
         else
+        {
             std::cout << "[잘못된 선택입니다. 다시 시도해주세요.]\n\n";
+        }
+
     }
 
     // 2) 방 만들기/참여 및 게임 세션 루프

@@ -6,6 +6,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <sstream>          
+#include <functional>       // std::hash
+
 
 // 기본 생성자: 멤버 초기화
 IOCPManager::IOCPManager()
@@ -14,6 +17,7 @@ IOCPManager::IOCPManager()
     , m_lpfnAcceptEx(nullptr)
     , m_lpfnGetAcceptExAddrs(nullptr)
     , m_nextSessionId(1)
+	, m_dbMgr(nullptr)
 {
 }
 
@@ -37,8 +41,11 @@ IOCPManager& IOCPManager::GetInstance()
     return *s_instance;
 }
 
-bool IOCPManager::Initialize(uint16_t port, int workerCount)
+bool IOCPManager::Initialize(uint16_t port, int workerCount, DatabaseManager* dbMgr)
 {
+
+    m_dbMgr = dbMgr;  // DB 매니저 저장
+
     // 1) Winsock 초기화
     WSADATA wsaData;
     if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0)
@@ -47,13 +54,7 @@ bool IOCPManager::Initialize(uint16_t port, int workerCount)
     }
 
     // 2) 리슨 소켓 생성 (오버랩 I/O용)
-    m_listenSocket = WSASocket(
-        AF_INET,
-        SOCK_STREAM,
-        IPPROTO_TCP,
-        NULL,
-        0,
-        WSA_FLAG_OVERLAPPED);
+    m_listenSocket = WSASocket(AF_INET, SOCK_STREAM, IPPROTO_TCP, NULL, 0, WSA_FLAG_OVERLAPPED);
 
     if (m_listenSocket == INVALID_SOCKET)
     {
@@ -278,10 +279,7 @@ void IOCPManager::HandleAccept(PerIOContext* ctx)
 }
 
 // Read 완료 시 처리 (명령 파싱 & 비즈니스 로직)
-void IOCPManager::HandleRead(
-    PerIOContext* ctx,
-    DWORD         bytesTransferred,
-    Session* session)
+void IOCPManager::HandleRead(PerIOContext* ctx, DWORD bytesTransferred, Session* session)
 {
     // raw 데이터를 문자열로 변환 및 개행 제거
     std::string msg(ctx->m_buffer, bytesTransferred);
@@ -302,6 +300,91 @@ void IOCPManager::HandleRead(
     else
     {
         cmd = msg;
+    }
+
+    // 비로그인 상태에서 REGISTER / LOGIN
+    if (!session->IsAuthenticated())
+    {
+        // 1) 회원가입
+        if (cmd == "REGISTER")
+        {
+            // username, password 분리
+            std::istringstream iss(arg);
+            std::string username, password;
+            iss >> username >> password;
+
+            if (m_dbMgr->UserExists(username))
+            {
+                session->Send("ERROR DUPLICATE_USER\n", 20);
+            }
+            else
+            {
+                // 단방향 해시 (std::hash 이용)
+                size_t h = std::hash<std::string>()(password);
+                std::ostringstream os;
+                os << std::hex << h;
+                std::string pwHash = os.str();
+
+                // users, user_status 테이블 삽입
+                std::string q1 = "INSERT INTO users (username, password_hash) VALUES ('"
+                    + username + "', '" + pwHash + "')";
+                bool ok1 = m_dbMgr->ExecuteNonQuery(q1);
+
+                if (ok1)
+                {
+                    unsigned long newId = m_dbMgr->GetLastInsertId();
+                    std::string q2 = "INSERT INTO user_status (user_id) VALUES ("
+                        + std::to_string(newId) + ")";
+                    m_dbMgr->ExecuteNonQuery(q2);
+
+                    session->Send("REGISTER_SUCCESS\n", 17);
+                }
+                else
+                {
+                    session->Send("ERROR REG_FAIL\n", 16);
+                }
+            }
+
+            PostRecv(session, ctx);
+            return;
+        }
+
+        // 2) 로그인
+        if (cmd == "LOGIN")
+        {
+            std::istringstream iss(arg);
+            std::string username, password;
+            iss >> username >> password;
+
+            // 해시 비교
+            size_t h = std::hash<std::string>()(password);
+            std::ostringstream os;
+            os << std::hex << h;
+            std::string pwHash = os.str();
+
+            // DB에서 사용자 조회
+            std::string q = "SELECT id FROM users WHERE username='"
+                + username + "' AND password_hash='"
+                + pwHash + "'";
+            int userId = 0;
+            if (m_dbMgr->ExecuteScalarInt(q, userId) && userId > 0)
+            {
+                session->SetUserId(userId);
+                session->Send("LOGIN_SUCCESS\n", 14);
+            }
+            else
+            {
+                session->Send("ERROR LOGIN_FAIL\n", 18);
+            }
+
+            PostRecv(session, ctx);
+            return;
+        }
+
+        // 비인증인데 다른 명령 들어오면 거부
+        session->Send("ERROR NOT_AUTH\n", 16);
+        PostRecv(session, ctx);
+        return;
     }
 
     // CREATE
@@ -379,18 +462,52 @@ void IOCPManager::HandleRead(
                     const char* r = "RESULT DRAW\n";
                     room->GetCreator()->Send(r, 12);
                     room->GetJoiner()->Send(r, 12);
+
+					// 게임 통계 업데이트
+                    int cid = room->GetCreator()->GetUserId();
+                    int jid = room->GetJoiner()->GetUserId();
+
+                    std::string u1 = "UPDATE user_status SET games_played=games_played+1, draws=draws+1 WHERE user_id="
+                        + std::to_string(cid);
+                    std::string u2 = "UPDATE user_status SET games_played=games_played+1, draws=draws+1 WHERE user_id="
+                        + std::to_string(jid);
+
+                    m_dbMgr->ExecuteNonQuery(u1);
+                    m_dbMgr->ExecuteNonQuery(u2);
+
                     break;
                 }
                 case RpsResult::FirstWin:
                 {
                     room->GetCreator()->Send("RESULT WIN\n", 11);
                     room->GetJoiner()->Send("RESULT LOSE\n", 12);
+
+                    // 승패 통계 업데이트
+                    int cid = room->GetCreator()->GetUserId();
+                    int jid = room->GetJoiner()->GetUserId();
+
+                    std::string win = "UPDATE user_status SET games_played=games_played+1, wins=wins+1 WHERE user_id=" + std::to_string(cid);
+                    std::string lose = "UPDATE user_status SET games_played=games_played+1, losses=losses+1 WHERE user_id=" + std::to_string(jid);
+                    m_dbMgr->ExecuteNonQuery(win);
+                    m_dbMgr->ExecuteNonQuery(lose);
+
                     break;
                 }
                 case RpsResult::SecondWin:
                 {
                     room->GetCreator()->Send("RESULT LOSE\n", 12);
                     room->GetJoiner()->Send("RESULT WIN\n", 11);
+
+
+                    // 승패 통계 업데이트
+                    int cid = room->GetCreator()->GetUserId();
+                    int jid = room->GetJoiner()->GetUserId();
+
+                    std::string lose = "UPDATE user_status SET games_played=games_played+1, losses=losses+1 WHERE user_id=" + std::to_string(cid);
+                    std::string win = "UPDATE user_status SET games_played=games_played+1, wins=wins+1 WHERE user_id=" + std::to_string(jid);
+                    m_dbMgr->ExecuteNonQuery(lose);
+                    m_dbMgr->ExecuteNonQuery(win);
+
                     break;
                 }
                 }

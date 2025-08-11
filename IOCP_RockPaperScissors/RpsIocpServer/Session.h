@@ -18,6 +18,10 @@ public:
 
     SOCKET GetSocket() const;
     int    GetId()     const;
+        
+    void   SetUserId(int userId);
+    int    GetUserId()   const;
+    bool   IsAuthenticated() const;
 
     void   SetRoom(Room* room);
     Room* GetRoom()   const;
@@ -36,6 +40,7 @@ public:
 
 private:
     SOCKET m_sock;    // 클라이언트 소켓
-    int    m_id;      // 세션 고유 ID
+    int    m_id;      // 세션 고유 ID    
+    int    m_userId;    // 로그인된 유저 ID (-1: 미인증)
     Room* m_room;    // 참가 중인 방 (없으면 nullptr)
 };

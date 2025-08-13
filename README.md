@@ -12,7 +12,6 @@
   - [프로젝트 개요](#프로젝트-개요)
   - [주요 기능](#주요-기능)
   - [기술 스택](#기술-스택)
-  - [아키텍처](#아키텍처)
   - [설치 및 실행](#설치-및-실행)
     - [사전 준비](#사전-준비)
     - [데이터베이스 구성](#데이터베이스-구성)
@@ -27,6 +26,8 @@
     - [GameLogic](#gamelogic)
     - [DatabaseManager](#databasemanager)
   - [예외 처리 및 주의사항](#예외-처리-및-주의사항)
+  - [알 수 없는 명령 → ERROR Unknown command](#알-수-없는-명령--error-unknown-command)
+  
 
 ---
 
@@ -77,26 +78,6 @@ MySQL에 유저 정보와 전적을 저장·관리합니다.
 
 ---
 
-## 아키텍처
-+------------+     +-------------+     +------------+
-| Client #1  |<--->| IOCPManager |<--->|  MySQL DB  |
-+------------+     +-------------+     +------------+
-       ^                   ^
-       |                   |
-+------------+             |
-| Client #2  |-------------+
-+------------+
-
-     Worker Threads pool
-
-
-1. Listen 소켓에 AcceptEx  
-2. I/O 완료 알림을 IOCP가 받아 Worker 스레드로 분배  
-3. Session 객체별 Read / Write 처리  
-4. DatabaseManager를 통해 MySQL 쿼리 실행  
-
----
-
 ## 설치 및 실행
 
 ### 사전 준비
@@ -131,6 +112,7 @@ CREATE TABLE user_status (
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
 ```
+---
 
 ## 사용 예시
 ### 게임 시작
@@ -195,6 +177,8 @@ CREATE TABLE user_status (
   서버 연결 실패 → "서버 연결 실패"
   로그인 또는 조회 오류 → 메인 메뉴 복귀
 
+---
+
 ## 주요 로직
 ### IOCPManager
 - Initialize(port, workerCount, dbMgr)
@@ -220,6 +204,8 @@ CREATE TABLE user_status (
 - CRUD 쿼리 실행(ExecuteNonQuery, ExecuteQuery, ExecuteScalarInt)
 - 사용자 존재 확인(UserExists), 마지막 삽입 ID 조회(GetLastInsertId)
 
+---
+
 ## 예외 처리 및 주의사항
 - 서버 연결 실패 → INVALID_SOCKET 처리 후 재시도 또는 종료
 - REGISTER
@@ -237,5 +223,5 @@ CREATE TABLE user_status (
 - MOVE
   게임 시작 전 → ERROR Game not started
   알 수 없는 명령 → ERROR Unknown command
-
+---
 

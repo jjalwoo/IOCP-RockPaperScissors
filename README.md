@@ -17,6 +17,16 @@
     - [사전 준비](#사전-준비)
     - [데이터베이스 구성](#데이터베이스-구성)
   - [사용 예시](#사용-예시)
+    - [게임 시작](#게임-시작)
+    - [회원 가입](#회원-가입)
+    - [전적 보기](#전적-보기)
+  - [주요 로직](#주요-로직)
+    - [IOCPManager](#iocpmanager)
+    - [Session](#session)
+    - [Room](#room)
+    - [GameLogic](#gamelogic)
+    - [DatabaseManager](#databasemanager)
+  - [예외 처리 및 주의사항](#예외-처리-및-주의사항)
 
 ---
 
@@ -123,6 +133,7 @@ CREATE TABLE user_status (
 ```
 
 ## 사용 예시
+### 게임 시작
 1. 클라이언트 실행 후 메인 메뉴:
 ```
 <가위바위보 게임>
@@ -144,7 +155,7 @@ CREATE TABLE user_status (
 [서버] Waiting for User...
 ```
 
-3. - 다른 클라이언트가 동일 방 ID로 참여:
+3. 다른 클라이언트가 동일 방 ID로 참여:
 ``` 
 [서버] OPPONENT_JOINED
 *** 상대가 입장했습니다! ***
@@ -152,12 +163,79 @@ CREATE TABLE user_status (
 *** 게임 시작! MOVE R/P/S 입력 ***
 ```
 
-4.- R/P/S 입력 예:
+4. R/P/S 입력 예:
 > R
 ``` 
 [서버] RESULT WIN
 ```
 
 5. - 메인으로 자동 복귀, 원할 때 전적 조회(3) 또는 재방 생성/참여(1)
+   
+### 회원 가입
+- 프로세스
+  ClientRegister()
+  ID/PW 입력 → 서버에 REGISTER username password\n 전송
+- 응답
+  REGISTER_SUCCESS → 가입 완료 메시지 후 메인 메뉴
+  ERROR DUPLICATE_USER → ID 중복 메시지 후 메인 메뉴
+  기타 오류 → ERROR REG_FAIL 등 표시 후 메인 메뉴
+- 예외 상황
+  서버 연결 실패 → "서버 연결 실패"
+  중복 ID → "ID가 중복되었습니다."
+
+### 전적 보기
+- 프로세스
+  ClientStats() 호출
+  ID/PW 입력 → 서버 접속 후 LOGIN → STATS\n 전송
+- 응답
+  STATS played wins draws losses → 화면 출력 후 메인 메뉴
+  로그인 실패 → 메인 메뉴
+  기타 오류 → "전적 불러오기 실패"
+- 예외 상황
+  서버 연결 실패 → "서버 연결 실패"
+  로그인 또는 조회 오류 → 메인 메뉴 복귀
+
+## 주요 로직
+### IOCPManager
+- Initialize(port, workerCount, dbMgr)
+- Winsock 초기화 → listen 소켓 생성·바인드·리스닝
+- AcceptEx, GetAcceptExAddrs 함수 포인터 로딩
+- IOCP 생성 및 리슨 소켓 등록
+- 워커 스레드 풀 기동 → GetQueuedCompletionStatus 루프 처리
+- I/O 타입별 핸들러
+- Accept → 새 Session 생성 및 첫 WSARecv 요청
+- Read  → 메시지 파싱 → 명령 분기 → 비즈니스 로직 처리
+- Write → 컨텍스트 해제
+  
+### Session
+- 클라이언트 소켓, 세션ID, 로그인 상태, 소속 Room 관리
+- Send/Receive 래퍼로 IOCPManager에 요청
+### Room
+- 방 ID, creator/joiner 포인터, 두 플레이어의 선택값, 게임 시작 플래그
+- Join, MakeMove, HasBothMoves, Resolve API 제공
+### GameLogic
+- ResolveRps(a, b) : ‘R’, ‘P’, ‘S’ 두 수치를 비교해 0=무승부, 1=첫 플레이어 승리, -1=두 번째 승리 반환
+### DatabaseManager
+- MySQL 연결 관리 (Initialize, Shutdown)
+- CRUD 쿼리 실행(ExecuteNonQuery, ExecuteQuery, ExecuteScalarInt)
+- 사용자 존재 확인(UserExists), 마지막 삽입 ID 조회(GetLastInsertId)
+
+## 예외 처리 및 주의사항
+- 서버 연결 실패 → INVALID_SOCKET 처리 후 재시도 또는 종료
+- REGISTER
+ 중복 ID → ERROR DUPLICATE_USER
+  기타 실패 → ERROR REG_FAIL
+- LOGIN
+  비밀번호 불일치 → ERROR LOGIN_FAIL
+- STATS
+  로그인 실패 → 메인으로 복귀
+- CREATE
+  이미 존재 → ERROR Room already exists
+- JOIN
+  존재하지 않는 방 → ERROR No such room
+  방 정원 초과 → ERROR Room full
+- MOVE
+  게임 시작 전 → ERROR Game not started
+  알 수 없는 명령 → ERROR Unknown command
 
 

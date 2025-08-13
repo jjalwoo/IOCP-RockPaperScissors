@@ -120,16 +120,19 @@ CREATE TABLE user_status (
   FOREIGN KEY (user_id) REFERENCES users(id)
     ON DELETE CASCADE
 ) ENGINE=InnoDB;
+```
 
 ## 사용 예시
 1. 클라이언트 실행 후 메인 메뉴:
+```
 <가위바위보 게임>
 1. 게임시작
 2. 회원 가입
 3. 전적 보기
 선택하세요> 1
-
+```
 2. “1” 입력 → 로그인 UI → 성공 시:
+```
 로그인 성공! 게임 시작 메뉴로 이동합니다.
 
 <가위바위보 게임>
@@ -139,17 +142,21 @@ CREATE TABLE user_status (
 
 방 ID를 입력하세요> room123
 [서버] Waiting for User...
+```
 
 3. - 다른 클라이언트가 동일 방 ID로 참여:
+``` 
 [서버] OPPONENT_JOINED
 *** 상대가 입장했습니다! ***
 [서버] START
 *** 게임 시작! MOVE R/P/S 입력 ***
+```
 
 4.- R/P/S 입력 예:
 > R
+``` 
 [서버] RESULT WIN
-
+```
 
 5. - 메인으로 자동 복귀, 원할 때 전적 조회(3) 또는 재방 생성/참여(1)
 

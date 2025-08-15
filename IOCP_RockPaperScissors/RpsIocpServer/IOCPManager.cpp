@@ -478,8 +478,7 @@ void IOCPManager::HandleRead(PerIOContext* ctx, DWORD bytesTransferred, Session*
         }
         else
         {
-            char m = static_cast<char>(
-                std::toupper(arg.empty() ? '?' : arg[0]));
+            char m = static_cast<char>(std::toupper(arg.empty() ? '?' : arg[0]));
             room->MakeMove(session, m);
 
             if (room->HasBothMoves())
@@ -562,9 +561,7 @@ void IOCPManager::HandleRead(PerIOContext* ctx, DWORD bytesTransferred, Session*
 }
 
 // Write 완료 시 컨텍스트 해제
-void IOCPManager::HandleWrite(
-    PerIOContext* ctx,
-    Session*      /*session*/)
+void IOCPManager::HandleWrite(PerIOContext* ctx, Session*)
 {
     delete ctx;
 }
@@ -609,9 +606,7 @@ void IOCPManager::PostAccept()
 }
 
 // 클라이언트 데이터 수신 요청
-void IOCPManager::PostRecv(
-    Session* session,
-    void* existingCtx)
+void IOCPManager::PostRecv(Session* session, void* existingCtx)
 {
     PerIOContext* ctx = nullptr;
 
@@ -653,10 +648,7 @@ void IOCPManager::PostRecv(
 }
 
 // 클라이언트로 데이터 전송 요청
-void IOCPManager::PostSend(
-    Session* session,
-    const char* data,
-    size_t      len)
+void IOCPManager::PostSend(Session* session, const char* data, size_t len)
 {
     PerIOContext* ctx = new PerIOContext();
     ZeroMemory(&ctx->m_overlapped, sizeof(OVERLAPPED));

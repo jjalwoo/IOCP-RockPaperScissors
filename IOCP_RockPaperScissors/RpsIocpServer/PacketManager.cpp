@@ -20,16 +20,12 @@ bool PacketManager::Parse( const char* buffer, size_t size, PacketHeader& outHea
     }
 
     // payload ºÐ¸®
-    outPayload.assign(
-        buffer + sizeof(PacketHeader),
-        buffer + sizeof(PacketHeader) + bodyLen);
+    outPayload.assign(buffer + sizeof(PacketHeader), buffer + sizeof(PacketHeader) + bodyLen);
 
     return true;
 }
 
-std::vector<char> PacketManager::Build(
-    PacketType               type,
-    const std::vector<char>& payload)
+std::vector<char> PacketManager::Build(PacketType type, const std::vector<char>& payload)
 {
     PacketHeader header;
     header.m_type = type;

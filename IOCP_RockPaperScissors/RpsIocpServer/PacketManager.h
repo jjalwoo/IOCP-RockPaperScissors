@@ -40,7 +40,5 @@ public:
      Build
       - 헤더+payload를 붙여 전송용 버퍼를 만든다.
     */
-    static std::vector<char> Build(
-        PacketType              type,
-        const std::vector<char>& payload);
+    static std::vector<char> Build(PacketType type, const std::vector<char>& payload);
 };

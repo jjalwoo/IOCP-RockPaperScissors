@@ -1,8 +1,6 @@
 #include "DatabaseManager.h"
 #include <iostream>
 
-
-
 DatabaseManager::DatabaseManager()
     : m_conn(nullptr)
 {

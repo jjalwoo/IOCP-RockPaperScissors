@@ -26,7 +26,7 @@ int main()
     }
 
     // 포트 9000, 워커 스레드 4개로 초기화
-    if (!server.Initialize(9000, 4, &dbManager))     // ---수정---
+    if (!server.Initialize(9000, 4, &dbManager))
     {
         return -1;
     }

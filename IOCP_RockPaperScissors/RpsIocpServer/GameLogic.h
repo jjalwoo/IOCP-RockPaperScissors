@@ -11,7 +11,6 @@ enum class RpsResult
     SecondWin   // 두 번째 플레이어 승리
 };
 
-
 /*
  GameLogic
   - RPS 가위바위보 룰을 구현.

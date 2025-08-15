@@ -45,7 +45,6 @@ public:
     // username 중복 체크
     bool UserExists(const std::string& username);
 
-
     /*
      Shutdown
       - 열려 있는 MySQL 연결을 닫고 정리합니다.

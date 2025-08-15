@@ -1,6 +1,6 @@
 # 🎮 Rock–Paper–Scissors Server (IOCP 기반)
 
-> Windows IOCP와 MySQL로 구현한 고성능 TCP 게임 서버 예제입니다.  
+> Windows IOCP와 MySQL로 구현한 TCP 기반 가위바위보 게임 서버 입니다.  
 > 회원 가입·로그인, 방 생성·참여, 실시간 대결, 전적 조회를 지원합니다.
 
 ---
